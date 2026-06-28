@@ -1225,10 +1225,7 @@ function potCalc(r){
 const LS_KEY='vda63_current';
 const LS_LIST='vda63_reports';
 const LS_CFG='vda63_cfg';
-let cfg=JSON.parse(localStorage.getItem(LS_CFG)||'{}'); // {supaUrl,supaKey,zeroRule,minA,minB}
-if(cfg.zeroRule===undefined) cfg.zeroRule=true;
-if(cfg.minA===undefined) cfg.minA=80; // A için her ögenin min %'si
-if(cfg.minB===undefined) cfg.minB=70; // B için her ögenin min %'si
+let cfg=JSON.parse(localStorage.getItem(LS_CFG)||'{}'); // {supaUrl,supaKey,driveUrl,driveSecret,mailerUrl} (puan düşürme → Değerlendirme matrisi _dgcfg)
 if(cfg.driveSecret===undefined) cfg.driveSecret='Sanifoam2026Drive'; // script'teki SECRET ile aynı (ERP ile ortak)
 let sb=null, rep=null, activeTab='header', saveTimer=null;
 // Kullanıcının kendi belgesinden içe aktardığı açıklamalar (soru no → metin); kalıcı, tüm raporlara uygulanır
@@ -1338,7 +1335,7 @@ function applyDescImport(){
   let n=0;
   if(rep){ rep.elements.forEach(el=>el.subs.forEach(s=>s.qs.forEach(q=>{ if(map[q.id]!=null && (overwrite|| !q.r)){ q.r=descOverrides[q.id]; n++; } }))); scheduleSave(); }
   closeModal(); render();
-  if(ok) toast(ids.length+' açıklama içe aktarıldı'+(rep?' · '+n+' bu rapora uygulandı':''),'ok');
+  if(ok){ syncDescOverrides(); toast(ids.length+' açıklama içe aktarıldı'+(rep?' · '+n+' bu rapora uygulandı':'')+(sb?' · buluta kaydedildi':''),'ok'); }
   else toast('Açıklamalar uygulandı ama kaydedilemedi (depolama dolu). Yine de bu oturumda görünür.','err');
 }
 
@@ -1517,6 +1514,22 @@ function saveDescOverrides(){
   if(safeSet('vda63_desc',JSON.stringify(descOverrides))) return true;
   compactStorage(); // yer aç ve tekrar dene
   return safeSet('vda63_desc',JSON.stringify(descOverrides));
+}
+// Açıklamaları buluta yaz (bir kez aktar → tüm ERP kullanıcıları görsün) — vda63_sync id='descriptions'
+async function syncDescOverrides(){
+  if(!sb) return; try{ await sb.from('vda63_sync').upsert({id:'descriptions',data:{desc:descOverrides}},{onConflict:'id'}); }catch(e){ console.warn('descSync',e); }
+}
+// Buluttaki açıklamaları çek + birleştir (bulut paylaşılan kaynak → yereldekini günceller), mevcut rapora uygula
+async function pullDescOverrides(){
+  if(!sb) return 0;
+  try{
+    const {data,error}=await sb.from('vda63_sync').select('data').eq('id','descriptions');
+    if(error||!data||!data.length||!data[0].data||!data[0].data.desc) return 0;
+    const cloud=data[0].data.desc; let n=0;
+    Object.keys(cloud).forEach(id=>{ if(cloud[id]!=null && descOverrides[id]!==cloud[id]){ descOverrides[id]=cloud[id]; n++; } });
+    if(n){ saveDescOverrides(); if(rep&&rep.elements) applyDescOverrides(rep.elements); if(activeTab==='questions') render(); }
+    return n;
+  }catch(e){ console.warn('descPull',e); return 0; }
 }
 // Eski (açıklama gömülü) kayıtları lean'e çevirerek yer açar
 function compactStorage(){
@@ -2257,7 +2270,8 @@ function viewQuestions(){
     <div class="vtog"><button class="${qViewMode==='vertical'?'on':''}" onclick="setQView('vertical')">☰ Yatay (liste)</button><button class="${qViewMode==='tabs'?'on':''}" onclick="setQView('tabs')">▦ Sekme</button></div>
     <label class="toggle-min"><input type="checkbox" ${showMin?'checked':''} onchange="showMin=this.checked;render()"> Açıklamalar açık</label>
     <button class="icon-btn" onclick="openDescImport()">📥 Açıklama içe aktar</button>
-    ${Object.keys(descOverrides).length?`<span class="pill" style="background:var(--A)" title="Kalıcı olarak saklanıyor">✓ ${Object.keys(descOverrides).length} açıklama yüklü</span>`:''}
+    ${sb?`<button class="icon-btn" onclick="pullDescOverrides().then(n=>toast(n?n+' açıklama buluttan alındı':'Bulutta yeni açıklama yok',n?'ok':'info'))" title="Başka kullanıcının yüklediği açıklamaları buluttan çek">☁ Buluttan çek</button>`:''}
+    ${Object.keys(descOverrides).length?`<span class="pill" style="background:var(--A)" title="Kalıcı olarak saklanıyor${sb?' + buluta senkron':''}">✓ ${Object.keys(descOverrides).length} açıklama yüklü</span>`:''}
     </div>`;
   if(qViewMode==='tabs'){
     const tabs=[];
@@ -2984,26 +2998,18 @@ function openSettings(){
     <div class="fld" style="margin-top:.5rem"><label>Bildirim (E-posta / Mailer) Web App URL</label><input id="s_mailer" placeholder="https://script.google.com/macros/s/.../exec" value="${esc(cfg.mailerUrl||'')}"></div>
     <p class="hint">Denetim planı e-postaları için (kurulum: <code>apps_script_mailer.gs</code>). Denetlenene soru listesi + denetçilere eşik tabanlı hatırlatma. Otomatik hatırlatma için script'te <code>dailyCheck</code> zaman tetikleyicisi + Supabase <code>vda63_sync</code> tablosu gerekir.</p>
     <p class="hint">Görsel/imza ekleme (📷) için. <code>apps_script_drive.gs</code>'i deploy edip URL'yi girin; secret script'teki <code>SECRET</code> ile aynı olmalı. Görseller Drive'da <b>VDA6.3/&lt;rapor&gt;/</b> klasörüne kaydolur. <button class="icon-btn" type="button" onclick="testDrive()">🔌 Bağlantıyı test et</button></p>
-    <hr style="border-color:var(--border);margin:1rem 0">
-    <div class="fld"><label><input type="checkbox" id="s_zero" ${cfg.zeroRule?'checked':''}> Sıfır puan kuralı (0 puanlı soru varsa sınıfı bir kademe düşür)</label></div>
-    <div class="grid2">
-      <div class="fld"><label>A için her ögenin min %'si</label><input type="number" id="s_minA" value="${cfg.minA}"></div>
-      <div class="fld"><label>B için her ögenin min %'si</label><input type="number" id="s_minB" value="${cfg.minB}"></div>
-    </div>
     <div class="modal-actions"><button class="btn" style="background:var(--bg3);color:var(--text);border:1px solid var(--border)" onclick="closeModal()">Kapat</button><button class="btn btn-light" onclick="saveSettings()">💾 Kaydet</button></div>`);
 }
 function saveSettings(){
   cfg.supaUrl=document.getElementById('s_url').value.trim();
   cfg.supaKey=document.getElementById('s_key').value.trim();
-  cfg.zeroRule=document.getElementById('s_zero').checked;
-  cfg.minA=+document.getElementById('s_minA').value||80;
-  cfg.minB=+document.getElementById('s_minB').value||70;
   cfg.driveUrl=document.getElementById('s_drive').value.trim();
   cfg.driveSecret=document.getElementById('s_drivesec').value.trim();
   cfg.mailerUrl=(document.getElementById('s_mailer')||{}).value.trim();
   localStorage.setItem(LS_CFG,JSON.stringify(cfg));
   initSupabase(); syncBadge('ok'); closeModal(); render(); toast('Ayarlar kaydedildi','ok');
   if(sb&&rep) cloudPush();
+  if(sb){ pullDescOverrides().then(n=>{ if(n) toast(n+' soru açıklaması buluttan alındı','ok'); syncDescOverrides(); }); } // paylaşılan açıklamaları çek + yereldekini yükle
 }
 async function testDrive(){
   const url=(document.getElementById('s_drive')||{}).value||cfg.driveUrl||'';
@@ -3086,6 +3092,7 @@ async function exportExcel(){
   if(cur){ try{ const o=JSON.parse(cur); if(o&&o.elements) rep=migrate(o); }catch(e){} }
   activeTab='home'; // açılış her zaman ana ekran (Başla)
   render();
+  pullDescOverrides().then(n=>{ if(n) toast(n+' soru açıklaması buluttan alındı','ok'); }); // paylaşılan açıklamaları çek
 })();
 </script>
 </body>
