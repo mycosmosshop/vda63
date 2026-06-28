@@ -1,0 +1,6 @@
+*.gs
+*.sql
+.claude/
+*.pdf
+*.xlsx
+scratchpad/
