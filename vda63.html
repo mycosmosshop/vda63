@@ -1555,10 +1555,10 @@ function loadReport(id){
   rep=migrate(JSON.parse(raw)); activeTab='header'; render(); saveLocal(); toast('Rapor açıldı','ok'); closeModal();
 }
 function deleteReport(id){
-  if(!confirm('Bu rapor silinsin mi?')) return;
+  if(!confirm('Bu rapor silinsin mi? (Bağlı kullanıcılarda da silinir)')) return;
   localStorage.removeItem('vda63_r_'+id);
   const l=JSON.parse(localStorage.getItem(LS_LIST)||'{}'); delete l[id]; localStorage.setItem(LS_LIST,JSON.stringify(l));
-  if(sb) sb.from('vda63_reports').delete().eq('id',id).then(()=>{});
+  if(sb){ sb.from('vda63_reports').delete().eq('id',id).then(()=>{}); _markReportDeleted(id); } // bulut satırını sil + tombstone (diğer cihazlarda da gitsin)
   if(rep&&rep.id===id){ rep=null; }
   refreshRepSel(); render();
 }
@@ -1573,15 +1573,16 @@ function syncBadge(state){
 // Tümünü buluttan çek (plan + tedarikçi + açıklama) — herkes aynı veriyi görsün
 async function pullShared(){
   if(!sb) return {};
-  const [d,p,s]=await Promise.all([pullDescOverrides(),pullPlans(),pullSuppliers()]);
+  const [d,p,s,r]=await Promise.all([pullDescOverrides(),pullPlans(),pullSuppliers(),pullAllReports()]);
   if(d && rep&&rep.elements) applyDescOverrides(rep.elements);
-  if(d||p||s) render();
-  return {d,p,s};
+  if(d||p||s||r){ refreshRepSel(); render(); }
+  return {d,p,s,r};
 }
 async function refreshShared(){
   if(!sb){ toast('Önce Ayarlar → Supabase bağlayın','err'); return; }
   syncBadge('pending'); const r=await pullShared(); syncBadge('ok');
-  toast('Buluttan yenilendi'+((r.p||r.s)?(' · plan/tedarikçi güncel'):''),'ok');
+  const got=[]; if(r.r)got.push(r.r+' rapor'); if(r.p)got.push('plan'); if(r.s)got.push('tedarikçi'); if(r.d)got.push(r.d+' açıklama');
+  toast(got.length?('Buluttan yenilendi: '+got.join(' · ')):'Güncel (yeni veri yok)','ok');
 }
 let cloudDisabled=false;
 async function cloudPush(){
@@ -1619,6 +1620,34 @@ async function cloudList(){
 }
 async function cloudOpen(id){
   if(!sb) return; try{ const {data,error}=await sb.from('vda63_reports').select('data').eq('id',id).single(); if(error||!data){ toast('Buluttan alınamadı','err'); return; } rep=migrate(data.data); activeTab='header'; render(); saveLocal(); toast('Buluttan açıldı','ok'); closeModal(); }catch(e){ toast('Hata','err'); }
+}
+// TÜM bulut raporlarını yerele indir (herkes tüm denetimleri görsün) + silinenleri yerelden temizle
+async function pullAllReports(){
+  if(!sb) return 0; let n=0;
+  try{
+    // 1) silinen rapor id'leri (tombstone) → yerelden kaldır
+    const {data:dd}=await sb.from('vda63_sync').select('data').eq('id','reports_deleted');
+    const del=(dd&&dd[0]&&dd[0].data&&dd[0].data.ids)||{};
+    if(Object.keys(del).length){ const l=JSON.parse(localStorage.getItem(LS_LIST)||'{}'); Object.keys(del).forEach(id=>{ localStorage.removeItem('vda63_r_'+id); if(l[id]) delete l[id]; }); localStorage.setItem(LS_LIST,JSON.stringify(l)); }
+    // 2) tüm bulut raporlarını çek (yerelde yok ya da bulut daha yeni ise indir)
+    const {data,error}=await sb.from('vda63_reports').select('id,name,type,updated_at,data').order('updated_at',{ascending:false});
+    if(error||!data) return n;
+    const l=JSON.parse(localStorage.getItem(LS_LIST)||'{}');
+    for(const c of data){
+      if(del[c.id]) continue;
+      const raw=localStorage.getItem('vda63_r_'+c.id);
+      const localU = raw? (()=>{try{return JSON.parse(raw).updatedAt||'';}catch(e){return '';}})() : '';
+      if(!raw || (c.updated_at||'')>localU){
+        try{ const full=leanReport(migrate(c.data)); if(safeSet('vda63_r_'+c.id, JSON.stringify(full))){ l[c.id]={name:c.name||'(adsız)',type:c.type,at:c.updated_at}; n++; } }catch(e){ console.warn('rapor indir',c.id,e); }
+      }
+    }
+    localStorage.setItem(LS_LIST,JSON.stringify(l));
+  }catch(e){ console.warn('pullAllReports',e); }
+  return n;
+}
+async function _markReportDeleted(id){
+  if(!sb) return;
+  try{ const {data}=await sb.from('vda63_sync').select('data').eq('id','reports_deleted'); const ids=(data&&data[0]&&data[0].data&&data[0].data.ids)||{}; ids[id]=new Date().toISOString(); await sb.from('vda63_sync').upsert({id:'reports_deleted',data:{ids}},{onConflict:'id'}); }catch(e){ console.warn('markDel',e); }
 }
 
 /* ---------- Rapor seçici ---------- */
@@ -3177,7 +3206,7 @@ async function exportExcel(){
   if(cur){ try{ const o=JSON.parse(cur); if(o&&o.elements) rep=migrate(o); }catch(e){} }
   activeTab='home'; // açılış her zaman ana ekran (Başla)
   render();
-  pullShared().then(r=>{ const msgs=[]; if(r.d)msgs.push(r.d+' açıklama'); if(r.p)msgs.push('planlar'); if(r.s)msgs.push('tedarikçiler'); if(msgs.length) toast('Buluttan alındı: '+msgs.join(' · '),'ok'); }); // paylaşılan veriyi çek (herkes aynı görsün)
+  pullShared().then(r=>{ const msgs=[]; if(r.r)msgs.push(r.r+' rapor'); if(r.p)msgs.push('planlar'); if(r.s)msgs.push('tedarikçiler'); if(r.d)msgs.push(r.d+' açıklama'); if(msgs.length) toast('Buluttan alındı: '+msgs.join(' · '),'ok'); }); // paylaşılan veriyi çek (herkes aynı görsün)
 })();
 </script>
 </body>
