@@ -1566,8 +1566,22 @@ function deleteReport(id){
 /* ---------- Supabase senkron ---------- */
 function syncBadge(state){
   const el=document.getElementById('syncBadge');
-  if(!sb){ el.textContent='💾 Yerel'; el.title='Yalnızca bu tarayıcıda. Ayarlar → Supabase ile buluta bağlayın.'; return; }
+  if(!sb){ el.textContent='💾 Yerel'; el.title='Yalnızca bu tarayıcıda. Ayarlar → Supabase ile buluta bağlayın.'; el.style.cursor='default'; el.onclick=null; return; }
   el.textContent={ok:'☁ Senkron',pending:'☁ Kaydediliyor…',err:'⚠ Bulut hatası'}[state]||'☁ Bağlı';
+  el.title='Tıkla: buluttan yenile (plan, tedarikçi, açıklama)'; el.style.cursor='pointer'; el.onclick=()=>refreshShared();
+}
+// Tümünü buluttan çek (plan + tedarikçi + açıklama) — herkes aynı veriyi görsün
+async function pullShared(){
+  if(!sb) return {};
+  const [d,p,s]=await Promise.all([pullDescOverrides(),pullPlans(),pullSuppliers()]);
+  if(d && rep&&rep.elements) applyDescOverrides(rep.elements);
+  if(d||p||s) render();
+  return {d,p,s};
+}
+async function refreshShared(){
+  if(!sb){ toast('Önce Ayarlar → Supabase bağlayın','err'); return; }
+  syncBadge('pending'); const r=await pullShared(); syncBadge('ok');
+  toast('Buluttan yenilendi'+((r.p||r.s)?(' · plan/tedarikçi güncel'):''),'ok');
 }
 let cloudDisabled=false;
 async function cloudPush(){
@@ -1656,12 +1670,38 @@ const PLAN_CATS={surec:'VDA 6.3 Süreç Denetimi',potansiyel:'VDA 6.3 Potansiyel
 const PLAN_CATCOLOR={surec:'var(--primary)',potansiyel:'var(--blue)',self:'#7c4dff',musteri:'var(--orange)',tedarikci:'#0891b2',diger:'var(--muted)'};
 const PLAN_STS=['Planlandı','Devam','Tamamlandı','İptal'];
 const PLAN_STCOLOR={'Planlandı':'var(--muted)','Devam':'var(--orange)','Tamamlandı':'var(--A)','İptal':'var(--C)'};
-function plansMap(){ return JSON.parse(localStorage.getItem(LS_PLANS)||'{}'); }
+/* ---------- Paylaşımlı koleksiyon senkronu (plan + tedarikçi): merge by updatedAt + tombstone ---------- */
+function _mergeColl(a,b){ const out=Object.assign({},a||{}); Object.keys(b||{}).forEach(id=>{ const x=out[id],y=b[id]; if(!x || (y.updatedAt||'')>(x.updatedAt||'')) out[id]=y; }); return out; } // sadece KESİN daha yeni bulut kazanır; eşitlikte yerel (silme/aktif düzenleme) korunur
+async function _syncColl(rowId, lsKey, dataKey){ // bulut ile birleştir, yerele yaz, buluta gönder
+  if(!sb) return;
+  try{
+    const {data}=await sb.from('vda63_sync').select('data').eq('id',rowId);
+    const cloud=(data&&data[0]&&data[0].data&&data[0].data[dataKey])||{};
+    const local=JSON.parse(localStorage.getItem(lsKey)||'{}');
+    const merged=_mergeColl(local,cloud);
+    localStorage.setItem(lsKey,JSON.stringify(merged));
+    await sb.from('vda63_sync').upsert({id:rowId,data:{[dataKey]:merged,at:new Date().toISOString()}},{onConflict:'id'});
+  }catch(e){ console.warn('syncColl '+rowId,e); }
+}
+async function _pullColl(rowId, lsKey, dataKey){ // buluttakini yerele birleştir
+  if(!sb) return 0;
+  try{
+    const {data}=await sb.from('vda63_sync').select('data').eq('id',rowId);
+    const cloud=(data&&data[0]&&data[0].data&&data[0].data[dataKey])||{};
+    if(!Object.keys(cloud).length) return 0;
+    const local=JSON.parse(localStorage.getItem(lsKey)||'{}');
+    localStorage.setItem(lsKey,JSON.stringify(_mergeColl(local,cloud)));
+    return Object.keys(cloud).length;
+  }catch(e){ console.warn('pullColl '+rowId,e); return 0; }
+}
+// Planlar (tombstone'lı; mailer data.plans okur)
+function rawPlans(){ return JSON.parse(localStorage.getItem(LS_PLANS)||'{}'); }
+function plansMap(){ const r=rawPlans(),o={}; for(const id in r){ if(!r[id].deleted) o[id]=r[id]; } return o; }
 function listPlans(){ return Object.values(plansMap()).sort((a,b)=>(b.plannedDate||'').localeCompare(a.plannedDate||'')); }
 function getPlan(id){ return plansMap()[id]; }
-function savePlanObj(p){ const l=plansMap(); l[p.id]=p; localStorage.setItem(LS_PLANS,JSON.stringify(l)); syncPlans(); }
-// Planları Supabase'e gönder (otomatik mailer'ın okuyabilmesi için; app kapalıyken bile çalışsın)
-async function syncPlans(){ if(!sb) return; try{ await sb.from('vda63_sync').upsert({id:'plans',data:{plans:plansMap(),settings:{at:rep?rep.updatedAt:''}}},{onConflict:'id'}); }catch(e){ console.warn('syncPlans',e); } }
+function savePlanObj(p){ p.updatedAt=new Date().toISOString(); const l=rawPlans(); l[p.id]=p; localStorage.setItem(LS_PLANS,JSON.stringify(l)); syncPlans(); }
+async function syncPlans(){ return _syncColl('plans',LS_PLANS,'plans'); }
+async function pullPlans(){ return _pullColl('plans',LS_PLANS,'plans'); }
 // Plan türüne göre (boş/planlanan) soru listesi
 function planQuestionList(p){
   const cat=CATALOG[p.reportType==='potansiyel'?'potansiyel':'surec']; const out=[];
@@ -1728,7 +1768,7 @@ async function showMailStatus(){
     <p class="hint" style="margin-top:.8rem">Ek kanıt: <b>Gmail → Gönderilmiş</b> klasöründe her gönderilen mail görünür. <b>Apps Script → Yürütmeler</b>'de her cron çalışması + "Gönderilen hatırlatma: N" logu vardır.</p>
     <div class="modal-actions"><button class="btn btn-light" onclick="closeModal()">Kapat</button></div>`;
 }
-function deletePlan(id){ if(!confirm('Denetim planı silinsin mi? (Bağlı rapor silinmez)')) return; const l=plansMap(); delete l[id]; localStorage.setItem(LS_PLANS,JSON.stringify(l)); render(); toast('Plan silindi','ok'); }
+function deletePlan(id){ if(!confirm('Denetim planı silinsin mi? (Bağlı rapor silinmez)')) return; const l=rawPlans(); l[id]={id,deleted:true,updatedAt:new Date().toISOString()}; localStorage.setItem(LS_PLANS,JSON.stringify(l)); syncPlans(); render(); toast('Plan silindi','ok'); }
 const RTYPE_SHORT={surec:'Süreç (P2–P7)',surec_p5p7:'P5–P7',potansiyel:'Potansiyel'};
 const PLAN_COLS=[
   {id:'category',label:'Kapsam',get:p=>`<span class="cat-badge" style="background:${PLAN_CATCOLOR[p.category]||'var(--muted)'}">${esc(PLAN_CATS[p.category]||p.category)}</span>`},
@@ -1862,12 +1902,16 @@ let _riskcfg=JSON.parse(localStorage.getItem('vda63_riskcfg')||'null')||{};
 (function(){ for(const k in RISK_DEFAULTS){ if(_riskcfg[k]===undefined) _riskcfg[k]=JSON.parse(JSON.stringify(RISK_DEFAULTS[k])); } })();
 function saveRiskCfg(){ localStorage.setItem('vda63_riskcfg',JSON.stringify(_riskcfg)); }
 function lookupRule(rule,x){ x=+x||0; for(const b of rule.bands){ if(x<=b.upto) return b.val; } return rule.over; }
-function supMap(){ return JSON.parse(localStorage.getItem(LS_SUP)||'{}'); }
+function rawSup(){ return JSON.parse(localStorage.getItem(LS_SUP)||'{}'); }
+function supMap(){ const r=rawSup(),o={}; for(const id in r){ if(!r[id].deleted) o[id]=r[id]; } return o; }
+let _supSyncTimer=null;
+function scheduleSupSync(){ if(!sb) return; clearTimeout(_supSyncTimer); _supSyncTimer=setTimeout(()=>_syncColl('suppliers',LS_SUP,'suppliers'),1200); }
+async function pullSuppliers(){ return _pullColl('suppliers',LS_SUP,'suppliers'); }
 function listSuppliers(){ return Object.values(supMap()); }
-function saveSup(s){ const l=supMap(); l[s.id]=s; localStorage.setItem(LS_SUP,JSON.stringify(l)); }
+function saveSup(s){ s.updatedAt=new Date().toISOString(); const l=rawSup(); l[s.id]=s; localStorage.setItem(LS_SUP,JSON.stringify(l)); scheduleSupSync(); }
 function addSupplier(){ saveSup({id:uid('sup'),name:'',ciro:5,imp:5,safety:5,comp:5,proc:5,procN:5,lastAuditYears:1,isNew:false,catalog:false,recurrence:0,ppm:0,creturn:0,recoOverride:'auto'}); render(); }
-function updSup(id,k,v){ const l=supMap(); if(l[id]){ l[id][k]=v; localStorage.setItem(LS_SUP,JSON.stringify(l)); render(); } }
-function delSupplier(id){ if(!confirm('Tedarikçi silinsin mi?'))return; const l=supMap(); delete l[id]; localStorage.setItem(LS_SUP,JSON.stringify(l)); render(); }
+function updSup(id,k,v){ const l=rawSup(); if(l[id]&&!l[id].deleted){ l[id][k]=v; l[id].updatedAt=new Date().toISOString(); localStorage.setItem(LS_SUP,JSON.stringify(l)); render(); scheduleSupSync(); } }
+function delSupplier(id){ if(!confirm('Tedarikçi silinsin mi?'))return; const l=rawSup(); l[id]={id,deleted:true,updatedAt:new Date().toISOString()}; localStorage.setItem(LS_SUP,JSON.stringify(l)); render(); scheduleSupSync(); }
 function compScore(count){ return lookupRule(_riskcfg.compRule,count); }
 function supplierRisk(s){
   if(s.catalog) return {catalog:true,risk:0,reco:s.recoOverride==='on'};
@@ -3027,7 +3071,7 @@ function saveSettings(){
   localStorage.setItem(LS_CFG,JSON.stringify(cfg));
   initSupabase(); syncBadge('ok'); closeModal(); render(); toast('Ayarlar kaydedildi','ok');
   if(sb&&rep) cloudPush();
-  if(sb){ pullDescOverrides().then(n=>{ if(n) toast(n+' soru açıklaması buluttan alındı','ok'); syncDescOverrides(); }); } // paylaşılan açıklamaları çek + yereldekini yükle
+  if(sb){ pullShared().then(()=>{ syncDescOverrides(); syncPlans(); _syncColl('suppliers',LS_SUP,'suppliers'); toast('Bulutla senkronlandı','ok'); }); } // paylaşılanları çek + yereldekini yükle (çift yön)
 }
 async function testDrive(){
   const url=(document.getElementById('s_drive')||{}).value||cfg.driveUrl||'';
@@ -3133,7 +3177,7 @@ async function exportExcel(){
   if(cur){ try{ const o=JSON.parse(cur); if(o&&o.elements) rep=migrate(o); }catch(e){} }
   activeTab='home'; // açılış her zaman ana ekran (Başla)
   render();
-  pullDescOverrides().then(n=>{ if(n) toast(n+' soru açıklaması buluttan alındı','ok'); }); // paylaşılan açıklamaları çek
+  pullShared().then(r=>{ const msgs=[]; if(r.d)msgs.push(r.d+' açıklama'); if(r.p)msgs.push('planlar'); if(r.s)msgs.push('tedarikçiler'); if(msgs.length) toast('Buluttan alındı: '+msgs.join(' · '),'ok'); }); // paylaşılan veriyi çek (herkes aynı görsün)
 })();
 </script>
 </body>
