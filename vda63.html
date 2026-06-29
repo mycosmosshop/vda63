@@ -1583,6 +1583,23 @@ async function cloudPush(){
   }
   catch(e){ syncBadge('err'); console.warn(e); }
 }
+// Bu tarayıcıdaki TÜM yerel raporları buluta yükle (eski/dokunulmamış kayıtlar da senkronlansın)
+async function cloudPushAll(){
+  if(!sb){ toast('Önce Ayarlar → Supabase bağlayın','err'); return; }
+  const items=listReports(); if(!items.length){ toast('Yerel rapor yok','err'); return; }
+  syncBadge('pending'); toast(items.length+' rapor buluta yükleniyor…');
+  let n=0,fail=0;
+  for(const i of items){
+    const r=reportFull(i.id); if(!r) { fail++; continue; }
+    try{ const {error}=await sb.from('vda63_reports').upsert({id:r.id,name:(r.meta&&r.meta.name)||'(adsız)',type:r.type,data:leanReport(r),updated_at:r.updatedAt||new Date().toISOString()},{onConflict:'id'});
+      if(error){ fail++; console.warn(error); if(error.code==='PGRST205'||/vda63_reports/i.test(error.message||'')){ toast('Bulut tablosu yok: Supabase\'de vda63_reports tablosunu oluşturun.','err'); syncBadge('err'); return; } }
+      else n++;
+    }catch(e){ fail++; console.warn(e); }
+  }
+  syncBadge(fail?'err':'ok');
+  toast(n+' rapor buluta yüklendi'+(fail?(' · '+fail+' hata'):''),fail?'err':'ok');
+  renderHomeCloud();
+}
 async function cloudList(){
   if(!sb) return []; try{ const {data,error}=await sb.from('vda63_reports').select('id,name,type,updated_at').order('updated_at',{ascending:false}); if(error){console.warn(error);return[];} return data||[]; }catch(e){ return []; }
 }
@@ -2078,6 +2095,7 @@ function homeCard(type,title,icon){
 }
 function viewHome(){
   return `<div class="home-title">VDA 6.3 Analiz Uygulaması</div>
+    ${sb?`<div class="no-print" style="margin:-.6rem 0 1rem;display:flex;gap:.6rem;flex-wrap:wrap;align-items:center"><button class="icon-btn" onclick="cloudPushAll()" title="Bu tarayıcıdaki TÜM raporları Supabase'e yükler (başka cihazlarda görünür)">☁ Tümünü buluta yükle</button><span class="muted" style="font-size:.78rem">Buluta yüklenmemiş eski raporları diğer cihazlarda görmek için kullanın.</span></div>`:''}
     <div class="home-grid">
       ${homeCard('surec','VDA 6.3 Süreç Denetimi (Tümü)','📊')}
       ${homeCard('potansiyel','VDA 6.3 Potansiyel Analizi','📄')}
@@ -3054,27 +3072,50 @@ function restoreJSON(file){
 async function exportExcel(){
   if(!rep){ toast('Önce rapor açın','err'); return; }
   if(!window.ExcelJS){ toast('Excel kütüphanesi yüklenemedi','err'); return; }
-  const wb=new ExcelJS.Workbook(); const o=overall(rep);
-  // Özet sayfası
+  const wb=new ExcelJS.Workbook(); const m=rep.meta, pot=isPot(rep);
+  const green=c=>{ c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF0A6E4F'}}; c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.alignment={vertical:'middle'}; };
+  const box=c=>{ c.border={top:{style:'thin'},left:{style:'thin'},bottom:{style:'thin'},right:{style:'thin'}}; };
+  // ---- Özet sayfası ----
   const ws=wb.addWorksheet('Özet');
-  ws.columns=[{width:14},{width:50},{width:10},{width:10}];
-  ws.addRow([CATALOG[rep.type].title]); ws.getRow(1).font={bold:true,size:14};
-  ws.addRow(['Rapor',rep.meta.name]); ws.addRow(['Denetlenen Org.',rep.meta.org.name]); ws.addRow(['Denetim Org.',rep.meta.auditOrg]);
-  ws.addRow(['Denetçi',rep.team.map(t=>t.name).filter(Boolean).join(', ')]);
-  ws.addRow(['Denetim Tarihi',(rep.meta.auditStart||'')+(rep.meta.auditEnd?' - '+rep.meta.auditEnd:'')]);
-  ws.addRow([]); ws.addRow(['Genel Uyum (EG)', o.EG!=null?o.EG+'%':'-','Sınıf',o.cls||'-']);
-  ws.addRow([]); const h=ws.addRow(['Öge','Ad','Soru','Uyum %']); h.font={bold:true};
-  o.els.forEach(x=>ws.addRow([x.el.id,x.el.name,x.n,x.pct]));
-  if(o.reasons.length){ ws.addRow([]); ws.addRow(['Düşürme kuralları:']); o.reasons.forEach(r=>ws.addRow(['',r])); }
-  // Sorular sayfası
+  ws.mergeCells('A1:F1'); ws.getCell('A1').value=CATALOG[rep.type].title; ws.getCell('A1').font={bold:true,size:14};
+  const bl=c=>{ c.font={bold:true}; c.alignment={vertical:'top'}; };
+  const two=(lL,vL,lR,vR)=>{ const r=ws.addRow([]); const n=r.number;
+    ws.getCell(n,1).value=lL; bl(ws.getCell(n,1)); ws.mergeCells(n,2,n,3); ws.getCell(n,2).value=vL; box(ws.getCell(n,1)); box(ws.getCell(n,2)); box(ws.getCell(n,3));
+    if(lR!=null){ ws.getCell(n,4).value=lR; bl(ws.getCell(n,4)); ws.mergeCells(n,5,n,6); ws.getCell(n,5).value=vR; box(ws.getCell(n,4)); box(ws.getCell(n,5)); box(ws.getCell(n,6)); } };
+  const wide=(l,v)=>{ const r=ws.addRow([]); const n=r.number; ws.getCell(n,1).value=l; bl(ws.getCell(n,1)); ws.mergeCells(n,2,n,6); ws.getCell(n,2).value=v||''; for(let c=1;c<=6;c++)box(ws.getCell(n,c)); };
+  two('Rapor Adı',m.name||'','Sipariş/Denetim No',m.orderNo||'');
+  two('Denetlenen organizasyon',(m.org&&m.org.name)||'','Müşteri',m.customer||'');
+  two('Rapor Tarihi',m.date||'','Denetim Tarihi',(m.auditStart||'')+(m.auditEnd?' – '+m.auditEnd:''));
+  wide('Denetçi(ler)',(rep.team||[]).map(t=>t.name).filter(Boolean).join(', '));
+  wide('Denetim nedeni',m.reason||''); wide('Denetim kapsamı',m.scope||'');
+  ws.addRow([]);
+  if(pot){ const p=potCalc(rep);
+    two('SONUÇ (Potansiyel)', POT_LBL[p.overall]+' — '+POT_STATUS[p.overall], '', '');
+    ws.addRow([]);
+    const hr=ws.addRow(['Öge','Ad','Yeşil','Sarı','Kırmızı','n.b.','Sonuç']); hr.eachCell(c=>{green(c);box(c);});
+    rep.elements.forEach(el=>{ if(rep.excluded[el.id])return; let y=0,s=0,k=0,n=0; elQ(el).forEach(q=>{const v=rep.scores[q.id]; if(v==='yesil')y++;else if(v==='sari')s++;else if(v==='kirmizi')k++;else if(v==='nb')n++;}); const cc=k>0?'kirmizi':(s>0?'sari':(y>0?'yesil':'nb')); const row=ws.addRow([el.id,el.name,y,s,k,n,POT_LBL[cc]]); row.eachCell(c=>box(c)); });
+  } else { const c=vdaCalc(rep);
+    two('GENEL UYUM EG', c.EG!=null?Math.round(c.EG)+'%':'-', 'SINIF', c.cls||'-');
+    ws.addRow([]);
+    const hr=ws.addRow(['Öge','Ad','Cevaplanan','Ulaşılan','Maks','EP %']); hr.eachCell(cc=>{green(cc);box(cc);});
+    c.elements.forEach(E=>{ const row=ws.addRow([E.el.id,E.el.name,E.excluded?'Değ. dışı':E.answered,E.excluded?'':E.achieved,E.excluded?'':E.max,E.excluded?'':(E.ep!=null?Math.round(E.ep)+'%':'-')]); row.eachCell(cc=>box(cc)); });
+    const hits=c.rules.filter(r=>!r.final&&r.cls&&r.cls!=='A');
+    if(hits.length){ ws.addRow([]); const dr=ws.addRow(['Aşağı çekme (downgrade):']); dr.getCell(1).font={bold:true}; hits.forEach(r=>{ const rr=ws.addRow(['',r.label+' → '+r.cls, r.why||'']); }); }
+  }
+  [16,46,12,12,10,12,14].forEach((w,i)=>{ const col=ws.getColumn(i+1); col.width=w; col.alignment={vertical:'top',wrapText:i===1}; });
+  // ---- Sorular sayfası ----
   const wq=wb.addWorksheet('Sorular');
-  wq.columns=[{width:10},{width:60},{width:8},{width:40}];
-  const qh=wq.addRow(['No','Soru','Puan','Bulgu/Not']); qh.font={bold:true};
-  allQuestions(rep).forEach(x=>{ const v=rep.scores[x.q.id]; wq.addRow([x.q.id,x.q.t,v==null?'':v==='nb'?'n.b.':v,rep.qnotes[x.q.id]||'']); });
-  // Aksiyon sayfası
-  if(rep.actions.length){ const wa=wb.addWorksheet('Aksiyon Planı'); wa.columns=[{width:6},{width:55},{width:18},{width:14},{width:10}];
-    const ah=wa.addRow(['#','Faaliyet','Sorumlu','Termin','Durum']); ah.font={bold:true};
-    rep.actions.forEach((a,i)=>wa.addRow([i+1,a.activity,a.resp,a.due,a.status])); }
+  const steps=pstepsArr(rep);
+  const qh=wq.addRow(['Öge','No','Soru','Sonuç','Bulgular','Dahili yorumlar']); qh.eachCell(c=>{green(c);box(c);});
+  rep.elements.forEach(el=>{ if(rep.excluded[el.id])return; el.subs.forEach(s=>s.qs.forEach(q=>{
+    let sc;
+    if(pot){ const v=rep.scores[q.id]; sc=v==null?'':(v==='nb'?'Uygulanamaz':POT_LBL[v]); }
+    else { const v=qEffScore(rep,q.id); sc=(v==null)?'':(v==='nb'?'n.b.':(typeof v==='number'?+(+v).toFixed(2):v)); }
+    const f=(rep.findings[q.id]||[]).join(' / ');
+    const cm=(rep.comments[q.id]||[]).map(c=>'['+(c.s||'')+'] '+(c.t||'')).join(' / ');
+    const row=wq.addRow([el.id,q.id+(q.star?'*':''),q.t,sc,f,cm]); row.eachCell(c=>box(c));
+  })); });
+  [10,10,60,12,40,40].forEach((w,i)=>{ const col=wq.getColumn(i+1); col.width=w; col.alignment={vertical:'top',wrapText:i===2||i>=4}; });
   const buf=await wb.xlsx.writeBuffer();
   const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
