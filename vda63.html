@@ -1560,6 +1560,7 @@ function deleteReport(id){
   if(!confirm('Bu rapor silinsin mi? (Bağlı kullanıcılarda da silinir)')) return;
   localStorage.removeItem('vda63_r_'+id);
   const l=JSON.parse(localStorage.getItem(LS_LIST)||'{}'); delete l[id]; localStorage.setItem(LS_LIST,JSON.stringify(l));
+  _silinmis[id]=new Date().toISOString();   // bu turda da gorunmesin
   if(sb){ sb.from('vda63_reports').delete().eq('id',id).then(()=>{}); _markReportDeleted(id); } // bulut satırını sil + tombstone (diğer cihazlarda da gitsin)
   if(rep&&rep.id===id){ rep=null; }
   refreshRepSel(); render();
@@ -1579,6 +1580,9 @@ async function pullShared(){
   const pushed=await autoPushReports(); // yereldeki yeni/eksik raporları otomatik buluta gönder (manuel yok)
   if(d && rep&&rep.elements) applyDescOverrides(rep.elements);
   if(d||p||s||r||pushed){ refreshRepSel(); render(); }
+  // Yeni veri gelmese de bir kez ciz: ilk cizimde bayrak kapali oldugu
+  // icin bulut satiri hic gosterilmemis olabilir.
+  else renderHomeCloud();
   return {d,p,s,r,pushed};
 }
 async function refreshShared(){
@@ -1631,6 +1635,7 @@ async function pullAllReports(){
     // 1) silinen rapor id'leri (tombstone) → yerelden kaldır
     const {data:dd}=await sb.from('vda63_sync').select('data').eq('id','reports_deleted');
     const del=(dd&&dd[0]&&dd[0].data&&dd[0].data.ids)||{};
+    _silinmis=del;                 // autoPush ve ana ekran da kullanir
     if(Object.keys(del).length){ const l=JSON.parse(localStorage.getItem(LS_LIST)||'{}'); Object.keys(del).forEach(id=>{ localStorage.removeItem('vda63_r_'+id); if(l[id]) delete l[id]; }); localStorage.setItem(LS_LIST,JSON.stringify(l)); }
     // 2) tüm bulut raporlarını çek (yerelde yok ya da bulut daha yeni ise indir)
     const {data,error}=await sb.from('vda63_reports').select('id,name,type,updated_at,data').order('updated_at',{ascending:false});
@@ -1665,6 +1670,7 @@ async function pullAllReports(){
                  'eski raporları silin (buluttan açılabilirler)','err'); }catch(e){}
     }
   }catch(e){ console.warn('pullAllReports',e); }
+  _pullBitti=true;
   return n;
 }
 async function _markReportDeleted(id){
@@ -1673,6 +1679,14 @@ async function _markReportDeleted(id){
 }
 // Bulutta olduğu bilinen rapor id'leri (ana ekranda ☁ rozeti için)
 let _cloudIds=new Set();
+// pullAllReports en az bir kez TAMAMLANDI mi. Bitmeden "Yalnizca
+// bulutta" satiri cizilirse daha inmemis kayitlar oyle gorunuyor.
+let _pullBitti=false;
+// Silinen rapor id'leri (tombstone). pullAllReports doldurur;
+// autoPushReports ve renderHomeCloud da bakmak ZORUNDA, yoksa
+// silinen kayit baska cihazdan buluta geri yuklenip "Yalnizca
+// bulutta" diye geri geliyor.
+let _silinmis={};
 // Yereldeki yeni/eksik TÜM raporları otomatik buluta gönder (manuel düğmeye gerek kalmasın)
 async function autoPushReports(){
   if(!sb) return 0;
@@ -1680,6 +1694,14 @@ async function autoPushReports(){
     const cl=await cloudList(); const cloudU={}; cl.forEach(c=>{ cloudU[c.id]=c.updated_at||''; _cloudIds.add(c.id); });
     let n=0;
     for(const i of listReports()){
+      // Silinmis kaydi buluta geri yukleme; ustelik bu tarayicidan da
+      // temizle, yoksa her senkronda yeniden dogar.
+      if(_silinmis[i.id]){
+        localStorage.removeItem('vda63_r_'+i.id);
+        const l2=JSON.parse(localStorage.getItem(LS_LIST)||'{}');
+        if(l2[i.id]){ delete l2[i.id]; localStorage.setItem(LS_LIST,JSON.stringify(l2)); }
+        continue;
+      }
       const r=reportFull(i.id); if(!r) continue; const lu=r.updatedAt||'';
       if(!(i.id in cloudU) || lu>(cloudU[i.id]||'')){
         try{ const {error}=await sb.from('vda63_reports').upsert({id:r.id,name:(r.meta&&r.meta.name)||'(adsız)',type:r.type,data:leanReport(r),updated_at:lu||new Date().toISOString()},{onConflict:'id'}); if(!error){ _cloudIds.add(r.id); n++; } else if(error.code==='PGRST205'||/vda63_reports/i.test(error.message||'')){ return n; } }catch(e){ console.warn('autoPush',e); }
@@ -2217,11 +2239,16 @@ function viewHome(){
 }
 async function renderHomeCloud(){
   if(!sb) return;
+  // Indirme bitmeden cizme: henuz inmemis kayitlar "Yalnizca bulutta"
+  // gorunup sonra kayboluyordu.
+  if(!_pullBitti) return;
   const cl=await cloudList(); if(!cl.length) return;
   const locIds=new Set(listReports().map(x=>x.id));
   ['surec','potansiyel'].forEach(type=>{
     const box=document.getElementById('home_'+type); if(!box) return;
-    const extra=cl.filter(c=>c.type===type && !locIds.has(c.id));
+    // Silinmis kayit "Yalnizca bulutta" diye gorunmemeli.
+    const extra=cl.filter(c=>c.type===type && !locIds.has(c.id)
+                            && !_silinmis[c.id]);
     if(extra.length) box.insertAdjacentHTML('beforeend', extra.map(c=>`<div class="list-row"><div style="flex:1;min-width:0;cursor:pointer" onclick="cloudOpen('${c.id}')"><div class="ln">☁ ${esc(c.name||'(adsız)')}</div><div class="lt">Yalnızca bulutta · ${c.updated_at?new Date(c.updated_at).toLocaleDateString('tr-TR'):''}</div></div><button class="icon-btn" onclick="cloudOpen('${c.id}')">Aç</button></div>`).join(''));
   });
 }
