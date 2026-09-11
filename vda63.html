@@ -1636,16 +1636,34 @@ async function pullAllReports(){
     const {data,error}=await sb.from('vda63_reports').select('id,name,type,updated_at,data').order('updated_at',{ascending:false});
     if(error||!data) return n;
     const l=JSON.parse(localStorage.getItem(LS_LIST)||'{}');
+    const sigmayan=[];
     for(const c of data){
       if(del[c.id]) continue;
       _cloudIds.add(c.id);
       const raw=localStorage.getItem('vda63_r_'+c.id);
       const localU = raw? (()=>{try{return JSON.parse(raw).updatedAt||'';}catch(e){return '';}})() : '';
       if(!raw || (c.updated_at||'')>localU){
-        try{ const full=leanReport(migrate(c.data)); if(safeSet('vda63_r_'+c.id, JSON.stringify(full))){ l[c.id]={name:c.name||'(adsız)',type:c.type,at:c.updated_at}; n++; } }catch(e){ console.warn('rapor indir',c.id,e); }
+        try{
+          const full=leanReport(migrate(c.data));
+          const json=JSON.stringify(full);
+          // Kota dolunca safeSet SESSIZCE false donuyordu: rapor inmiyor,
+          // listeye girmiyor, ana ekranda "Yalnizca bulutta" kaliyordu.
+          // saveLocal() ayni durumda yer acip tekrar deniyor — burada da.
+          let yazildi=safeSet('vda63_r_'+c.id, json);
+          if(!yazildi){ compactStorage(); yazildi=safeSet('vda63_r_'+c.id, json); }
+          if(yazildi){ l[c.id]={name:c.name||'(adsız)',type:c.type,at:c.updated_at}; n++; }
+          else sigmayan.push(c.name||c.id);
+        }catch(e){ console.warn('rapor indir',c.id,e); sigmayan.push(c.name||c.id); }
       }
     }
     localStorage.setItem(LS_LIST,JSON.stringify(l));
+    if(sigmayan.length){
+      // Sessizce kaybolmasin: kullanici neden "Yalnizca bulutta" kaldigini
+      // bilmeli, yoksa senkron calisiyor sanip veriyi yerelde arar.
+      console.warn('yerele sigmayan rapor', sigmayan);
+      try{ toast(sigmayan.length+' rapor tarayıcı belleğine sığmadı — '+
+                 'eski raporları silin (buluttan açılabilirler)','err'); }catch(e){}
+    }
   }catch(e){ console.warn('pullAllReports',e); }
   return n;
 }
